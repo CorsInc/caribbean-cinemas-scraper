@@ -1,0 +1,13 @@
+{
+  "name": "caribbean-cinemas-scraper",
+  "version": "1.0.0",
+  "description": "Scraper para caribbeancinemas.com - extrae cartelera de películas",
+  "main": "scraper.js",
+  "scripts": {
+    "start": "node scraper.js",
+    "scrape": "node scraper.js"
+  },
+  "dependencies": {
+    "puppeteer": "^22.0.0"
+  }
+}
