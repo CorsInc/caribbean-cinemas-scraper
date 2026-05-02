@@ -9,14 +9,13 @@ async function scrapeCaribbeanCinemas(theater = null) {
   });
 
   const page = await browser.newPage();
-  page.setDefaultTimeout(30000);
+  page.setDefaultTimeout(45000);
 
   // Intercept network requests to find API calls
   let apiData = null;
   await page.setRequestInterception(true);
   page.on('request', (request) => {
     const url = request.url();
-    // Look for API endpoints that return movie data
     if (url.includes('/api/') || url.includes('graphql') || url.includes('.json')) {
       console.log('[API]', url);
     }
@@ -29,7 +28,6 @@ async function scrapeCaribbeanCinemas(theater = null) {
     if (contentType.includes('json') || url.includes('/api/')) {
       try {
         const json = await response.json();
-        console.log('[JSON from]', url);
         if (json && (json.movies || json.data || json.results)) {
           apiData = json;
         }
@@ -39,26 +37,30 @@ async function scrapeCaribbeanCinemas(theater = null) {
     }
   });
 
-  console.log(`Navegando a ${BASE_URL}...`);
-  await page.goto(BASE_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+  // Navigate to the now-showing page
+  const targetUrl = theater
+    ? `${BASE_URL}/now-showing/?theater=${encodeURIComponent(theater)}`
+    : `${BASE_URL}/now-showing/`;
+
+  console.log(`Navegando a ${targetUrl}...`);
+  await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 45000 });
 
   // Wait a bit more for dynamic content
-  await new Promise(r => setTimeout(r, 3000));
+  await new Promise(r => setTimeout(r, 5000));
 
-  // Try to find movie elements
-  const pageContent = await page.content();
-
-  // Try to extract movie cards
+  // Try to extract movie data
   const movies = await page.evaluate(() => {
     const results = [];
 
-    // Method 1: Look for common movie card patterns
+    // Method 1: Look for movie cards with common selectors
     const selectors = [
       '.movie-card', '.movie-item', '.film-card', '.movie',
       '[class*="movie"]', '[class*="film"]', '[class*="pelicula"]',
       '.card', '.item', 'article',
-      // Look for links that might be movie pages
-      'a[href*="/movie/"]', 'a[href*="/pelicula/"]', 'a[href*="/film/"]'
+      'a[href*="/movie/"]', 'a[href*="/pelicula/"]', 'a[href*="/film/"]',
+      // Specific to Caribbean Cinemas
+      '.showtime-card', '.movie-poster', '.poster',
+      '.film-item', '.movie-grid > div', '.movies-grid > div'
     ];
 
     for (const sel of selectors) {
@@ -68,40 +70,51 @@ async function scrapeCaribbeanCinemas(theater = null) {
           const title = el.querySelector('h2, h3, h4, .title, [class*="title"], [class*="name"]')?.textContent?.trim()
             || el.getAttribute('title')
             || el.getAttribute('alt')
+            || el.querySelector('img')?.getAttribute('alt')
             || '';
           const img = el.querySelector('img')?.src || '';
           const link = el.closest('a')?.href || el.querySelector('a')?.href || '';
-          const time = el.querySelector('[class*="time"], [class*="hour"], [class*="schedule"]')?.textContent?.trim() || '';
+          const timeElements = el.querySelectorAll('[class*="time"], [class*="hour"], [class*="schedule"], [class*="showtime"]');
+          const times = Array.from(timeElements).map(t => t.textContent.trim()).filter(Boolean);
 
           if (title) {
-            results.push({ title, img, link, time, selector: sel });
+            results.push({ title, img, link, times, selector: sel });
           }
         });
         if (results.length > 0) break;
       }
     }
 
-    // Method 2: Try to get all text content and find movie titles
+    // Method 2: Try to get all text and find structured data
     if (results.length === 0) {
       const text = document.body.innerText;
       const lines = text.split('\n').filter(l => l.trim());
-      // Look for common movie patterns - capitalized titles
-      lines.forEach((line, i) => {
+      let currentMovie = null;
+      
+      for (const line of lines) {
         const trimmed = line.trim();
-        if (trimmed.length > 5 && trimmed.length < 100 &&
-            /^[A-Z][a-z]+/.test(trimmed) &&
-            !trimmed.includes('http') &&
-            !trimmed.includes('@') &&
-            !trimmed.match(/^\d/)) {
-          results.push({ title: trimmed, method: 'text-extract' });
+        // Skip navigation/UI text
+        if (['NOW SHOWING', 'NEW THIS WEEK', 'COMING SOON', 'THEATERS', 'Puerto Rico', 'Español',
+             'English', 'VIP', 'FINE ARTS', 'GROUPS/EVENTS', 'CINEMA EVENTS', 'CINEMASCLUB',
+             'Birthdays', 'Camps', 'Corporate', 'Opera', 'Ballet', 'National Theatre London',
+             'MORE LOCATIONS IN THE CARIBBEAN'].includes(trimmed)) {
+          continue;
         }
-      });
+        // Detect movie title (all caps or title case, not a URL, not a time)
+        if (trimmed.length > 3 && trimmed.length < 80 &&
+            !trimmed.includes('http') && !trimmed.includes('@') &&
+            !trimmed.match(/^\d/) && !trimmed.match(/^\d+:\d+/) &&
+            /^[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+/.test(trimmed)) {
+          currentMovie = { title: trimmed, method: 'text-extract' };
+          results.push(currentMovie);
+        }
+      }
     }
 
     return results;
   });
 
-  // Also get all the raw text for analysis
+  // Get all raw text for analysis
   const rawText = await page.evaluate(() => document.body.innerText);
 
   await browser.close();
@@ -110,7 +123,7 @@ async function scrapeCaribbeanCinemas(theater = null) {
     movies,
     rawText: rawText.substring(0, 5000),
     apiData,
-    url: BASE_URL
+    url: targetUrl
   };
 }
 
@@ -118,12 +131,14 @@ async function scrapeCaribbeanCinemas(theater = null) {
 if (require.main === module) {
   (async () => {
     try {
-      const result = await scrapeCaribbeanCinemas();
+      const theater = process.argv[2] || null;
+      const result = await scrapeCaribbeanCinemas(theater);
+      
       console.log('\n========== PELÍCULAS ENCONTRADAS ==========');
       if (result.movies && result.movies.length > 0) {
         result.movies.forEach((m, i) => {
           console.log(`${i + 1}. ${m.title}`);
-          if (m.time) console.log(`   Horario: ${m.time}`);
+          if (m.times && m.times.length > 0) console.log(`   Horarios: ${m.times.join(', ')}`);
           if (m.link) console.log(`   Link: ${m.link}`);
           if (m.img) console.log(`   Imagen: ${m.img}`);
           console.log('');
@@ -131,7 +146,7 @@ if (require.main === module) {
       } else {
         console.log('No se encontraron películas con los selectores.');
         console.log('\n--- Texto extraído (primeros 3000 chars) ---');
-        console.log(result.rawText);
+        console.log(result.rawText?.substring(0, 3000));
       }
 
       if (result.apiData) {
@@ -140,6 +155,7 @@ if (require.main === module) {
       }
     } catch (err) {
       console.error('Error:', err.message);
+      process.exit(1);
     }
   })();
 }
